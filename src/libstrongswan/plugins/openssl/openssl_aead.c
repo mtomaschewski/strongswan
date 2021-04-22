@@ -142,15 +142,26 @@ static bool crypt_ccm(private_aead_t *this, chunk_t data, chunk_t assoc, chunk_t
 	u_char nonce[NONCE_LEN]; /* 12 octets (one more than needed) */
 	bool success = FALSE;
 	int len;
+	int old;
+	chunk_t dump;
 
 	/* Construct the RFC5282 short 11-octet nonce */
 	memcpy(nonce, this->salt, this->salt_len);
 	memcpy(nonce + this->salt_len, iv.ptr, IV_LEN);
+	dump = chunk_create(nonce, this->salt_len + IV_LEN);
+	DBG4(DBG_IKE, "%s: nonce: %B", __func__, &dump);
 
 	/* Initialize cipher context */
 	if (!(ctx = EVP_CIPHER_CTX_new()))
 	{
+		DBG2(DBG_IKE, "%s failure: EVP_CipherInit_ex(ctx, %s, NULL, NULL, NULL, %s)",
+				__func__, EVP_CIPHER_name(this->cipher), enc ? "encrypt" : "decrypt");
 		return FALSE;
+	}
+	else
+	{
+		DBG3(DBG_IKE, "%s success: EVP_CipherInit_ex(ctx, %s, NULL, NULL, NULL, %s)",
+				__func__, EVP_CIPHER_name(this->cipher), enc ? "encrypt" : "decrypt");
 	}
 
 	/* Disable padding (plain seems to be already padded) */
@@ -159,59 +170,123 @@ static bool crypt_ccm(private_aead_t *this, chunk_t data, chunk_t assoc, chunk_t
 	/* Initialize the cipher for encryption / decryption */
 	if (!EVP_CipherInit_ex(ctx, this->cipher, NULL, NULL, NULL, enc))
 	{
+		DBG2(DBG_IKE, "%s failure: EVP_CipherInit_ex(ctx, this->cipher, NULL, NULL, NULL, %s)",
+				__func__, enc ? "encrypt" : "decrypt");
 		goto done;
+	}
+	else
+	{
+		DBG3(DBG_IKE, "%s success: EVP_CipherInit_ex(ctx, this->cipher, NULL, NULL, NULL, %s)",
+				__func__, enc ? "encrypt" : "decrypt");
 	}
 
 	/* Set the nonce length (11) */
 	if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_IVLEN, this->salt_len + IV_LEN, NULL))
 	{
+		DBG2(DBG_IKE, "%s failure: EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_IVLEN, %zu, NULL)",
+				__func__, this->salt_len + IV_LEN);
 		goto done;
+	}
+	else
+	{
+		DBG3(DBG_IKE, "%s success: EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_IVLEN, %zu, NULL)",
+				__func__, this->salt_len + IV_LEN);
 	}
 
 	/* Set the expected tag length (encryption) / the value (decryption) to use */
 	if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_TAG, this->icv_size, enc ? NULL :
 									data.ptr + data.len))
 	{
+		DBG2(DBG_IKE, "%s failure: EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_TAG, %zu, %s)",
+				__func__, this->icv_size, enc ? NULL : "data.ptr + data.len");
 		goto done;
+	}
+	else
+	{
+		DBG3(DBG_IKE, "%s success: EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_TAG, %zu, %s)",
+				__func__, this->icv_size, enc ? NULL : "data.ptr + data.len");
 	}
 
 	/* Initialise key and nonce of salt + IV for encryption / decryption */
 	if (!EVP_CipherInit_ex(ctx, NULL, NULL, this->key.ptr, nonce, enc))
 	{
+		DBG2(DBG_IKE, "%s failure: EVP_CipherInit_ex(ctx, NULL, NULL, this->key.ptr, nonce, %s)",
+				__func__, enc ? "encrypt" : "decrypt");
 		goto done;
+	}
+	else
+	{
+		DBG3(DBG_IKE, "%s success: EVP_CipherInit_ex(ctx, NULL, NULL, this->key.ptr, nonce, %s)",
+				__func__, enc ? "encrypt" : "decrypt");
 	}
 
 	/* Provide the total plain or total encrypted length (plain + icv_size). */
 	if (!EVP_CipherUpdate(ctx, NULL, &len, NULL, data.len))
 	{
+		DBG2(DBG_IKE, "%s failure: EVP_CipherUpdate(ctx, NULL, &len, NULL, data.len: %zu)",
+				__func__, data.len);
 		goto done;
+	}
+	else
+	{
+		DBG3(DBG_IKE, "%s success: EVP_CipherUpdate(ctx, NULL, &len => %d, NULL, data.len: %zu)",
+				__func__, len, data.len);
 	}
 
 	/* Provide AAD data. This can be called zero or more times as required */
 	if (assoc.len && !EVP_CipherUpdate(ctx, NULL, &len, assoc.ptr, assoc.len))
 	{
+		DBG2(DBG_IKE, "%s failure: EVP_CipherUpdate(ctx, NULL, &len, assoc.ptr, assoc.len: %zu)",
+				__func__, assoc.len);
 		goto done;
+	}
+	else if (assoc.len)
+	{
+		DBG3(DBG_IKE, "%s success: EVP_CipherUpdate(ctx, NULL, &len => %zu, assoc.ptr, assoc.len: %zu)",
+				__func__, len, assoc.len);
 	}
 
 	/* Provide the message to be encrypted / decrypted and obtain output + length
 	 * Can only be called once */
 	if (!EVP_CipherUpdate(ctx, out, &len, data.ptr, data.len))
 	{
+		DBG2(DBG_IKE, "%s failure: EVP_CipherUpdate(ctx, out, &len, data.ptr, data.len: %zu)",
+				__func__, data.len);
 		goto done;
+	}
+	else
+	{
+		DBG3(DBG_IKE, "%s success: EVP_CipherUpdate(ctx, out, &len => %zu, data.ptr, data.len: %zu)",
+				__func__, len, data.len);
 	}
 
 	/* Finalise the encryption. Normally encrypted bytes may be written at this
 	 * stage, but this does not occur in CCM mode. */
+	old = len;
 	if (enc && !EVP_CipherFinal_ex(ctx, out + len, &len))
 	{
+		DBG2(DBG_IKE, "%s failure: EVP_CipherFinal_ex(ctx, out + len: %zu, &len)",
+				__func__, old);
 		goto done;
+	}
+	else if (enc)
+	{
+		DBG3(DBG_IKE, "%s success: EVP_CipherFinal_ex(ctx, out + len: %zu, &len => %zu)",
+				__func__, old, len);
 	}
 
 	/* Get the tag on encrypption */
 	if (enc && !EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_GET_TAG, this->icv_size,
 									data.ptr + data.len))
 	{
+		DBG2(DBG_IKE, "%s failure: EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_GET_TAG, this->icv_size: %zu, data.ptr + data.len:  %zu)",
+				__func__, this->icv_size, data.len);
 		goto done;
+	}
+	else
+	{
+		DBG3(DBG_IKE, "%s success: EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_GET_TAG, this->icv_size: %zu, data.ptr + data.len:  %zu)",
+				__func__, this->icv_size, data.len);
 	}
 
 	success = TRUE;
@@ -226,14 +301,31 @@ METHOD(aead_t, encrypt, bool,
 	chunk_t *encrypted)
 {
 	u_char *out;
+	bool ret;
+
+	DBG4(DBG_IKE, "openssl %s: cipher: %s", __func__, EVP_CIPHER_name(this->cipher));
+	DBG4(DBG_IKE, "openssl %s: plain: %B", __func__, &plain);
+	DBG4(DBG_IKE, "openssl %s: assoc: %B", __func__, &assoc);
+	DBG4(DBG_IKE, "openssl %s: iv: %B", __func__, &iv);
 
 	out = plain.ptr;
 	if (encrypted)
 	{
 		*encrypted = chunk_alloc(plain.len + this->icv_size);
 		out = encrypted->ptr;
+		DBG4(DBG_IKE, "openssl %s: out => enrypted: %zu", __func__, plain.len + this->icv_size);
 	}
-	return this->crypt(this, plain, assoc, iv, out, 1);
+	else
+	{
+		DBG4(DBG_IKE, "openssl %s: out => plain", __func__);
+	}
+	ret = this->crypt(this, plain, assoc, iv, out, 1);
+	if (ret) {
+		DBG3(DBG_IKE, "openssl %s: this->crypt(this, plain, assoc, iv, out, 1): success", __func__);
+	} else {
+		DBG2(DBG_IKE, "openssl %s: this->crypt(this, plain, assoc, iv, out, 1): failure", __func__);
+	}
+	return ret;
 }
 
 METHOD(aead_t, decrypt, bool,
@@ -241,11 +333,17 @@ METHOD(aead_t, decrypt, bool,
 	chunk_t *plain)
 {
 	u_char *out;
+	bool ret;
 
 	if (encrypted.len < this->icv_size)
 	{
 		return FALSE;
 	}
+	DBG4(DBG_IKE, "openssl %s: cipher: %s", __func__, EVP_CIPHER_name(this->cipher));
+	DBG4(DBG_IKE, "openssl %s: encrypted: %B", __func__, &encrypted);
+	DBG4(DBG_IKE, "openssl %s: assoc: %B", __func__, &assoc);
+	DBG4(DBG_IKE, "openssl %s: iv: %B", __func__, &iv);
+
 	encrypted.len -= this->icv_size;
 
 	out = encrypted.ptr;
@@ -253,8 +351,19 @@ METHOD(aead_t, decrypt, bool,
 	{
 		*plain = chunk_alloc(encrypted.len);
 		out = plain->ptr;
+		DBG4(DBG_IKE, "openssl %s: out => plain: %zu", __func__, encrypted.len);
 	}
-	return this->crypt(this, encrypted, assoc, iv, out, 0);
+	else
+	{
+		DBG4(DBG_IKE, "openssl %s: out => encrypted", __func__);
+	}
+	ret = this->crypt(this, encrypted, assoc, iv, out, 0);
+	if (ret) {
+		DBG3(DBG_IKE, "openssl %s: this->crypt(this, encrypted, assoc, iv, out, 0): success", __func__);
+	} else {
+		DBG3(DBG_IKE, "openssl %s: this->crypt(this, encrypted, assoc, iv, out, 0): failure", __func__);
+	}
+	return ret;
 }
 
 METHOD(aead_t, get_block_size, size_t,
